@@ -17,7 +17,8 @@ jobs:
       fail-fast: false
       matrix:
         repo:
-          - AristocratTechnologiesInc/gdk
+          - pradeepkumboju/v3
+          # - AristocratTechnologiesInc/gdk
           # - AristocratTechnologiesInc/another-service
           # Add more repos here
 
