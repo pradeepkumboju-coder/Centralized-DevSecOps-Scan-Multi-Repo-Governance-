@@ -16,7 +16,7 @@ jobs:
       matrix:
         repo:
           # - AristocratTechnologiesInc/gdk
-          - pradeepkumboju/v3
+          - pradeepkumboju-coder/v3
           # Add more repos here as needed
 
     steps:
