@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         repo:
-          - AristocratTechnologiesInc/gdk
+          # - AristocratTechnologiesInc/gdk
           - pradeepkumboju/v3
           # Add more repos here as needed
 
