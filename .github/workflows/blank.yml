@@ -1,0 +1,145 @@
+name: Centralized DevSecOps Scan (Multi-Repo Governance)
+
+on:
+  workflow_dispatch: {}     # Manual trigger from Actions tab
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  security-scan:
+    name: Security & Quality Scans Across Repos
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - AristocratTechnologiesInc/gdk
+          # - AristocratTechnologiesInc/another-service
+          # Add more repos here
+
+    steps:
+      # 1️⃣ Checkout central workflow repo
+      - name: Checkout central governance repo
+        uses: actions/checkout@v4
+
+      # 2️⃣ Prepare directory for target clones
+      - name: Setup workspace
+        run: |
+          mkdir -p git-repos
+          ls -ltr
+
+      # 3️⃣ Extract repo name
+      - name: Extract repo name
+        id: extract_repo
+        run: echo "repo_name=$(basename ${{ matrix.repo }})" >> $GITHUB_OUTPUT
+
+      # 4️⃣ Checkout target repo
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          token: ${{ secrets.TARGET_TOKEN }}
+          path: git-repos/${{ steps.extract_repo.outputs.repo_name }}
+
+      - name: Verify repo contents
+        run: |
+          cd git-repos/${{ steps.extract_repo.outputs.repo_name }}
+          echo "Scanning repository: $(pwd)"
+          ls -ltr
+
+      # 5️⃣ Setup Node (for dependency audits)
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.17.0
+          registry-url: https://npm.pkg.github.com
+          scope: '@aristocrattechnologiesinc'
+
+      - name: Configure npm authentication
+        run: |
+          echo "@aristocrattechnologiesinc:registry=https://npm.pkg.github.com" > ~/.npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.TARGET_TOKEN }}" >> ~/.npmrc
+
+      # 6️⃣ Run dependency audit (npm + pnpm)
+      - name: Run dependency audit
+        run: |
+          cd git-repos/${{ steps.extract_repo.outputs.repo_name }}
+          mkdir -p reports tmp
+
+          echo "=== Running npm audit ==="
+          if [ -f package-lock.json ]; then
+            npm install --ignore-scripts --no-audit || true
+            npm audit --json > tmp/npm-audit.json || true
+          fi
+
+          echo "=== Running pnpm audit ==="
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --ignore-scripts --no-frozen-lockfile || true
+            pnpm audit --json > tmp/pnpm-audit.json || true
+          fi
+
+          echo "<html><body><h2>Dependency Audit Summary for ${{ steps.extract_repo.outputs.repo_name }}</h2><pre>" > reports/dependency-report.html
+          cat tmp/npm-audit.json tmp/pnpm-audit.json >> reports/dependency-report.html
+          echo "</pre></body></html>" >> reports/dependency-report.html
+
+      # 7️⃣ Secret Scanning
+      - name: Run Secret Detection
+        run: |
+          cd git-repos/${{ steps.extract_repo.outputs.repo_name }}
+          python3 -m pip install detect-secrets --quiet
+          detect-secrets scan > tmp/secrets.json
+          echo "<html><body><h2>Secret Scan Report</h2><pre>" > reports/secrets-report.html
+          cat tmp/secrets.json >> reports/secrets-report.html
+          echo "</pre></body></html>" >> reports/secrets-report.html
+
+      # 8️⃣ Container / Filesystem scan using Trivy
+      - name: Container and Filesystem Security Scan
+        run: |
+          cd git-repos/${{ steps.extract_repo.outputs.repo_name }}
+          mkdir -p reports tmp
+
+          echo "=== Running Trivy filesystem scan ==="
+          trivy fs --quiet --format json -o tmp/trivy-fs.json .
+
+          if [ -f Dockerfile ]; then
+            echo "=== Building Docker image ==="
+            docker build -t repo-scan-image .
+            echo "=== Scanning Docker image ==="
+            trivy image --quiet --format json -o tmp/trivy-image.json repo-scan-image
+          fi
+
+          echo "<html><body><h2>Container/Image Scan</h2><pre>" > reports/container-report.html
+          cat tmp/trivy-fs.json tmp/trivy-image.json 2>/dev/null || true
+          echo "</pre></body></html>" >> reports/container-report.html
+
+      # 9️⃣ SonarCloud Static & Code Quality Scan
+      - name: Run SonarCloud Scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+          SONAR_ORG: ${{ secrets.SONAR_ORG }}
+        run: |
+          cd git-repos/${{ steps.extract_repo.outputs.repo_name }}
+          if [ -f sonar-project.properties ]; then
+            echo "=== Running SonarCloud analysis ==="
+            sonar-scanner \
+              -Dsonar.organization=${SONAR_ORG} \
+              -Dsonar.projectKey=${SONAR_PROJECT_KEY}-${{ steps.extract_repo.outputs.repo_name }} \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=https://sonarcloud.io \
+              -Dsonar.login=${SONAR_TOKEN} || true
+          else
+            echo "No sonar-project.properties found — skipping SonarCloud scan"
+          fi
+
+      # 🔟 Upload reports per repo
+      - name: Upload consolidated reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: devsecops-scan-${{ steps.extract_repo.outputs.repo_name }}
+          path: git-repos/${{ steps.extract_repo.outputs.repo_name }}/reports/
